@@ -1,346 +1,535 @@
+/// lib/recipe_analysis_page.dart
+import 'dart:io';
+import 'dart:convert'; // Necesario para el Hash
 import 'package:flutter/material.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart'; // <-- Importación de FontAwesome
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:crypto/crypto.dart';
+import 'virtual_chef_page.dart';
+import 'models/user_profile.dart';
+import 'services/storage_service.dart';
+import 'services/clarifai_service.dart';
+import 'services/recipe_service.dart';
+import 'widgets/profile_avatar_menu.dart';
+class RecipeAnalysisPage extends StatefulWidget {
+  final File imageFile;
+  final UserProfile? userProfile;
 
-class RecipeAnalysisPage extends StatelessWidget {
-  const RecipeAnalysisPage({super.key});
+  const RecipeAnalysisPage({super.key, required this.imageFile, this.userProfile});
 
-  // --- PALETA DE COLORES ---
+  @override
+  State<RecipeAnalysisPage> createState() => _RecipeAnalysisPageState();
+}
+
+class _RecipeAnalysisPageState extends State<RecipeAnalysisPage> {
+
+  final RecipeService _recipeService = RecipeService();
+
+  Map<String, dynamic>? _datosIA;
+  bool _analizando = true;
+
+  List<bool> _checksIngredientes = [];
+  bool _mostrarTodosLosIngredientes = false;
+
   final Color primaryColor = const Color(0xFF016782);
   final Color primaryDim = const Color(0xFF005B73);
   final Color backgroundColor = const Color(0xFFF7F9FB);
   final Color onSurface = const Color(0xFF2C3437);
   final Color onSurfaceVariant = const Color(0xFF596064);
-  final Color surfaceContainerLowest = const Color(0xFFFFFFFF);
   final Color surfaceContainerLow = const Color(0xFFF0F4F7);
-  final Color surfaceContainerHighest = const Color(0xFFDCE4E8);
+  final Color surfaceContainerLowest = const Color(0xFFFFFFFF);
   final Color secondaryContainer = const Color(0xFFCFE6F1);
   final Color onSecondaryContainer = const Color(0xFF3F555E);
-  final Color primaryContainer = const Color(0xFF94DFFE);
+
+  @override
+  void initState() {
+    super.initState();
+    _ejecutarAnalisisCompleto();
+  }
+
+  Future<void> _ejecutarAnalisisCompleto() async {
+    try {
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId == null) throw Exception("Usuario no autenticado");
+
+      final bytes = await widget.imageFile.readAsBytes();
+      final String hashActual = sha256.convert(bytes).toString();
+      debugPrint("Huella de la imagen: $hashActual");
+
+      final recetaExistente = await _recipeService.buscarRecetaPorHash(userId, hashActual);
+
+      if (recetaExistente != null) {
+        debugPrint("¡IMAGEN ENCONTRADA! Recuperando de la BD de forma instantánea...");
+
+        if (mounted) {
+          setState(() {
+            _datosIA = Map<String, dynamic>.from(recetaExistente['instrucciones_json'] ?? {});
+            _datosIA?['plato'] = recetaExistente['titulo_receta'];
+            _datosIA?['tiempo'] = recetaExistente['tiempo_estimado']?.toString();
+            _analizando = false;
+
+            if (_datosIA!['ingredientes'] != null) {
+              _checksIngredientes = List.generate(
+                  (_datosIA!['ingredientes'] as List).length, (index) => false);
+            }
+          });
+        }
+        return;
+      }
+
+      debugPrint("Imagen nueva. Enviando a IA y subiendo a Storage...");
+      final storageService = StorageService();
+
+      var results = await Future.wait([
+        storageService.uploadImage(imageFile: widget.imageFile, bucketName: 'recipes'),
+        ClarifaiService.analizarRecetaJson(widget.imageFile),
+      ]);
+
+      String? url = results[0] as String?;
+      Map<String, dynamic>? jsonIA = results[1] as Map<String, dynamic>?;
+
+      if (mounted) {
+        // CONTROL CRÍTICO: Si la IA falló, avisamos al usuario y NO guardamos nada en la BD
+        if (jsonIA == null) {
+          setState(() => _analizando = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('El servidor de IA está despertando. Por favor, regresa e inténtalo de nuevo en unos segundos.'),
+              backgroundColor: Colors.amber,
+            ),
+          );
+          return;
+        }
+
+        setState(() {
+          _datosIA = jsonIA;
+          _analizando = false;
+          if (_datosIA != null && _datosIA!['ingredientes'] != null) {
+            _checksIngredientes = List.generate(
+                (_datosIA!['ingredientes'] as List).length, (index) => false);
+          }
+        });
+
+        if (url != null) {
+          _guardarEnBaseDeDatos(url, hashActual);
+        }
+      }
+    } catch (e) {
+      debugPrint("Error en el proceso general de análisis: $e");
+      if (mounted) setState(() => _analizando = false);
+    }
+  }
+
+  Future<void> _guardarEnBaseDeDatos(String url, String hash) async {
+    try {
+      final userId = Supabase.instance.client.auth.currentUser!.id;
+      await Supabase.instance.client.from('recetas').insert({
+        'id_autor': userId,
+        'imagen_url': url,
+        'titulo_receta': _datosIA?['plato'] ?? 'Nuevo Platillo',
+        'ingredientes_input': 'Analizado por IA',
+        'instrucciones_json': _datosIA ?? {},
+        'hash_imagen': hash,
+      });
+      debugPrint("Receta guardada exitosamente en BD con su Hash.");
+    } catch (e) {
+      debugPrint("Error DB al guardar receta: $e");
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: backgroundColor,
-      // --- APP BAR (Sin título) ---
-      appBar: AppBar(
-        backgroundColor: backgroundColor.withOpacity(0.9),
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Color(0xFF016782)),
-          onPressed: () => Navigator.pop(context),
-        ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 24.0),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: surfaceContainerHighest,
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.person, color: Color(0xFF747C80)),
-            ),
-          ),
+      body: Stack(
+        children: [
+          _buildBody(),
+          _buildFloatingActionButton(),
         ],
       ),
+    );
+  }
 
-      // --- CUERPO PRINCIPAL ---
-      // Reduje el padding inferior de 120 a 100 porque ya no hay barra inferior
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.only(left: 24.0, right: 24.0, top: 16.0, bottom: 100.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // BADGE "Analysis Complete"
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: secondaryContainer,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(
-                "ANALYSIS COMPLETE",
-                style: TextStyle(
-                  color: onSecondaryContainer,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1.5,
-                ),
-              ),
+  Widget _buildBody() {
+    return CustomScrollView(
+      slivers: [
+        SliverAppBar(
+          backgroundColor: backgroundColor.withOpacity(0.9),
+          floating: true,
+          elevation: 0,
+          leading: IconButton(
+            icon: Icon(Icons.arrow_back, color: primaryColor),
+            onPressed: () => Navigator.pop(context),
+          ),
+          title: Text("EpicurIA", style: TextStyle(
+              color: primaryColor, fontWeight: FontWeight.bold)),
+          actions: [
+            ProfileAvatarMenu(
+              userProfile: widget.userProfile,
+              radius: 18.0,
+              paddingRight: 16.0,
             ),
-            const SizedBox(height: 12),
+          ],
+        ),
 
-            // TÍTULO Y FOTO DE LA COMIDA
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 120),
+          sliver: SliverList(
+            delegate: SliverChildListDelegate([
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(color: secondaryContainer,
+                      borderRadius: BorderRadius.circular(20)),
                   child: Text(
-                    "Salmón con\nEspárragos",
-                    style: TextStyle(
-                      fontSize: 36,
-                      fontWeight: FontWeight.w800,
-                      color: onSurface,
-                      height: 1.1,
-                      letterSpacing: -0.5,
-                    ),
+                    _analizando ? "ANALYZING..." : "ANALYSIS COMPLETE",
+                    style: TextStyle(color: onSecondaryContainer,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.2),
                   ),
                 ),
-                const SizedBox(width: 16),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: Image.network(
-                    "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?ixlib=rb-4.0.3&auto=format&fit=crop&w=150&q=80",
-                    width: 80,
-                    height: 80,
-                    fit: BoxFit.cover,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 32),
-
-            // NUTRITION BENTO
-            Row(
-              children: [
-                _buildNutritionBox("CALORIES", "420", "kcal"),
-                const SizedBox(width: 12),
-                _buildNutritionBox("PROTEIN", "34", "g"),
-                const SizedBox(width: 12),
-                _buildNutritionBox("TIME", "25", "min"),
-              ],
-            ),
-            const SizedBox(height: 32),
-
-            // TABS
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _buildTab("Ingredientes", isActive: true),
-                  const SizedBox(width: 24),
-                  _buildTab("Preparación", isActive: false),
-                  const SizedBox(width: 24),
-                  _buildTab("Información Nutricional", isActive: false),
-                ],
               ),
-            ),
-            const SizedBox(height: 24),
+              const SizedBox(height: 16),
 
-            // CHECKLIST DE INGREDIENTES
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: surfaceContainerLowest,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Row(
-                    children: [
-                      Icon(Icons.shopping_basket, color: primaryColor),
-                      const SizedBox(width: 8),
-                      const Text(
-                        "Checklist de Ingredientes",
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  Expanded(
+                    child: Text(
+                      _analizando ? "Identificando..." : (_datosIA?['plato'] ??
+                          "Sin nombre"),
+                      style: TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.w900,
+                        color: onSurface,
+                        height: 1.1,
+                        letterSpacing: -0.5,
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  _buildChecklistItem("2 Filetes de Salmón Fresco", "200g cada uno, con piel", false),
-                  _buildChecklistItem("1 Manojo de Espárragos", "Retirar la parte leñosa del tallo", false),
-                  _buildChecklistItem("Aceite de Oliva Virgen Extra", "2 cucharadas soperas", true),
-                  _buildChecklistItem("Limón y Eneldo", "Para aromatizar y decorar", false),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // AI INTELLIGENCE PULSE
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: primaryContainer.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(30),
-                border: Border.all(color: Colors.white.withOpacity(0.5)),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(color: primaryColor, shape: BoxShape.circle),
-                    child: const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                   const SizedBox(width: 16),
-                  const Expanded(
-                    child: Text(
-                      '"He ajustado las cantidades basándome en tu perfil de entrenamiento de hoy."',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF005065)),
+                  Hero(
+                    tag: 'dish_photo',
+                    child: Container(
+                      width: 80, height: 80,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.white, width: 2),
+                        boxShadow: const [BoxShadow(color: Colors.black12,
+                            blurRadius: 10)
+                        ],
+                        image: DecorationImage(image: FileImage(
+                            widget.imageFile), fit: BoxFit.cover),
+                      ),
                     ),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 48),
+              const SizedBox(height: 32),
 
-            // PREPARATION SNEAK PEEK
-            Opacity(
-              opacity: 0.8,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              Row(
                 children: [
-                  const Text("Próximos Pasos", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 16),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text("01", style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: surfaceContainerHighest)),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text("Precalentar y Sazonar", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: onSurface)),
-                            const SizedBox(height: 4),
-                            Text(
-                              "Lleva el horno a 200°C. Sazona el salmón con sal, pimienta y eneldo fresco sobre papel para hornear.",
-                              style: TextStyle(color: onSurfaceVariant, fontSize: 14, height: 1.5),
-                            ),
-                          ],
-                        ),
-                      )
-                    ],
-                  )
+                  _buildBentoItem(
+                      "CALORIES", "${_datosIA?['calorias'] ?? '---'}", "kcal"),
+                  const SizedBox(width: 12),
+                  _buildBentoItem(
+                      "PROTEIN", "${_datosIA?['proteina'] ?? '---'}", "g"),
+                  const SizedBox(width: 12),
+                  _buildBentoItem(
+                      "TIME", "${_datosIA?['tiempo'] ?? '---'}", "min"),
                 ],
               ),
-            )
-          ],
-        ),
-      ),
+              const SizedBox(height: 32),
 
-      // --- BOTÓN FLOTANTE (Ahora más abajo y con FontAwesome) ---
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-      floatingActionButton: Container(
-        margin: const EdgeInsets.only(bottom: 24), // <--- Reducido de 80 a 24 para que baje
-        child: ElevatedButton.icon(
-          onPressed: () {
-            print("Iniciando modo voz...");
-          },
-          // Uso de FontAwesome aquí 👇
-          icon: const FaIcon(FontAwesomeIcons.microphone, size: 20),
-          label: const Text(
-            "Empezar a Cocinar (Modo Voz)",
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: primaryColor,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-            elevation: 8,
-            shadowColor: primaryColor.withOpacity(0.5),
+              _buildTabs(),
+              const SizedBox(height: 24),
+
+              _buildIngredientsCard(),
+
+              const SizedBox(height: 24),
+
+              _buildAIPulse(),
+            ]),
           ),
         ),
-      ),
-      // --- SE ELIMINÓ EL BOTTOM NAVIGATION BAR ---
-    );
-  }
-
-  // --- WIDGETS DE APOYO ---
-
-  Widget _buildNutritionBox(String label, String value, String unit) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: surfaceContainerLow, borderRadius: BorderRadius.circular(16)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: onSurfaceVariant, letterSpacing: 1.2)),
-            const SizedBox(height: 4),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              children: [
-                Text(value, style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: primaryColor)),
-                const SizedBox(width: 2),
-                Text(unit, style: TextStyle(fontSize: 12, color: onSurfaceVariant)),
-              ],
-            )
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTab(String text, {required bool isActive}) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          text,
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: isActive ? FontWeight.bold : FontWeight.w600,
-            color: isActive ? primaryColor : onSurfaceVariant.withOpacity(0.6),
-          ),
-        ),
-        if (isActive) ...[
-          const SizedBox(height: 4),
-          Container(height: 4, width: 30, decoration: BoxDecoration(color: primaryColor, borderRadius: BorderRadius.circular(2))),
-        ]
       ],
     );
   }
 
-  Widget _buildChecklistItem(String title, String subtitle, bool isCrossedOut) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16.0),
-      child: Row(
+  Widget _buildBentoItem(String label, String value, String unit) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(color: surfaceContainerLow,
+            borderRadius: BorderRadius.circular(18)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: TextStyle(fontSize: 9,
+                fontWeight: FontWeight.bold,
+                color: onSurfaceVariant,
+                letterSpacing: 1.1)),
+            const SizedBox(height: 4),
+            RichText(
+              text: TextSpan(
+                children: [
+                  TextSpan(text: value,
+                      style: TextStyle(fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                          color: primaryColor)),
+                  TextSpan(text: " $unit",
+                      style: TextStyle(fontSize: 12,
+                          color: onSurfaceVariant,
+                          fontWeight: FontWeight.normal)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabs() {
+    return Row(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Ingredientes", style: TextStyle(fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: primaryColor)),
+            const SizedBox(height: 4),
+            Container(width: 40,
+                height: 4,
+                decoration: BoxDecoration(color: primaryColor,
+                    borderRadius: BorderRadius.circular(2))),
+          ],
+        ),
+        const SizedBox(width: 24),
+        Text("Preparación", style: TextStyle(fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: onSurfaceVariant.withOpacity(0.5))),
+      ],
+    );
+  }
+
+  Widget _buildIngredientsCard() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.03),
+              blurRadius: 20,
+              offset: const Offset(0, 10))
+        ],
+      ),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(  
-            width: 24,
-            height: 24,
-            margin: const EdgeInsets.only(top: 2),
-            decoration: BoxDecoration(
-              color: isCrossedOut ? primaryColor : surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: isCrossedOut ? const Icon(Icons.check, size: 16, color: Colors.white) : null,
+          Row(
+            children: [
+              Icon(
+                  Icons.shopping_basket_rounded, color: primaryColor, size: 24),
+              const SizedBox(width: 10),
+              const Text("Checklist de Ingredientes",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            ],
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Opacity(
-              opacity: isCrossedOut ? 0.4 : 1.0,
+          const SizedBox(height: 24),
+
+          if (_analizando)
+            const Center(child: CircularProgressIndicator())
+          else
+            if (_datosIA?['ingredientes'] != null)
+              ...() {
+                final ingredientes = _datosIA!['ingredientes'] as List<dynamic>;
+                final int limite = 3;
+
+                final int aMostrar = (_mostrarTodosLosIngredientes ||
+                    ingredientes.length <= limite)
+                    ? ingredientes.length
+                    : limite;
+
+                List<Widget> items = List.generate(aMostrar, (index) {
+                  final item = ingredientes[index];
+                  return _buildIngredientRow(
+                      index, item['nombre'], item['detalle'] ?? "");
+                });
+
+                if (ingredientes.length > limite) {
+                  items.add(
+                    Center(
+                      child: TextButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _mostrarTodosLosIngredientes =
+                            !_mostrarTodosLosIngredientes;
+                          });
+                        },
+                        icon: Icon(
+                          _mostrarTodosLosIngredientes
+                              ? Icons.keyboard_arrow_up
+                              : Icons.keyboard_arrow_down,
+                          color: primaryColor,
+                        ),
+                        label: Text(
+                          _mostrarTodosLosIngredientes
+                              ? "Ver menos"
+                              : "Ver ${ingredientes.length -
+                              limite} ingredientes más",
+                          style: TextStyle(
+                              color: primaryColor, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+                return items;
+              }()
+        ],
+      ),
+    );
+  }
+
+  Widget _buildIngredientRow(int index, String nombre, String detalle) {
+    bool checked = _checksIngredientes[index];
+    return GestureDetector(
+      onTap: () => setState(() => _checksIngredientes[index] = !checked),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 20.0),
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: 26,
+              height: 26,
+              decoration: BoxDecoration(
+                color: checked ? primaryColor : surfaceContainerLow,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: checked ? const Icon(
+                  Icons.check, color: Colors.white, size: 18) : null,
+            ),
+            const SizedBox(width: 16),
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    title,
+                    nombre,
                     style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      decoration: isCrossedOut ? TextDecoration.lineThrough : null,
+                      fontSize: 15, fontWeight: FontWeight.bold,
+                      decoration: checked ? TextDecoration.lineThrough : null,
+                      color: checked
+                          ? onSurfaceVariant.withOpacity(0.5)
+                          : onSurface,
                     ),
                   ),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: onSurfaceVariant,
-                      decoration: isCrossedOut ? TextDecoration.lineThrough : null,
+                  if (detalle.isNotEmpty)
+                    Text(
+                      detalle,
+                      style: TextStyle(
+                        fontSize: 13, color: onSurfaceVariant.withOpacity(0.7),
+                        decoration: checked ? TextDecoration.lineThrough : null,
+                      ),
                     ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAIPulse() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: primaryColor.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: primaryColor.withOpacity(0.1)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+                color: primaryColor, shape: BoxShape.circle),
+            child: const Icon(
+                Icons.auto_awesome, color: Colors.white, size: 18),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              "\"He detectado estos ingredientes. ¿Quieres que busque sustitutos saludables?\"",
+              style: TextStyle(fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  fontStyle: FontStyle.italic),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFloatingActionButton() {
+    return Positioned(
+      bottom: 30,
+      left: 24,
+      right: 24,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 500),
+        opacity: _analizando ? 0 : 1,
+        child: Container(
+          height: 64,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(32),
+            gradient: LinearGradient(colors: [primaryColor, primaryDim]),
+            boxShadow: [
+              BoxShadow(color: primaryColor.withOpacity(0.3),
+                  blurRadius: 20,
+                  offset: const Offset(0, 10))
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(32),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    fullscreenDialog: true,
+                    // Enviamos los datos reales de la receta analizada al Chef Virtual
+                    builder: (_) => VirtualChefPage(recipeData: _datosIA ?? {}),
+                  ),
+                );
+              },
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  Icon(Icons.mic_rounded, color: Colors.white, size: 28),
+                  SizedBox(width: 12),
+                  Text(
+                    "Empezar a Cocinar (Modo Voz)",
+                    style: TextStyle(color: Colors.white,
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold),
                   ),
                 ],
               ),
             ),
-          )
-        ],
+          ),
+        ),
       ),
     );
   }

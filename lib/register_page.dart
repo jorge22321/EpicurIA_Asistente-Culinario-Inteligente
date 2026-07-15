@@ -1,199 +1,380 @@
 import 'package:flutter/material.dart';
-
-class RegisterPage extends StatelessWidget {
+import 'services/auth_service.dart';
+import 'main_layout.dart';
+class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});
 
-  // --- PALETA DE COLORES DE TU DISEÑO ---
+  @override
+  State<RegisterPage> createState() => _RegisterPageState();
+}
+
+class _RegisterPageState extends State<RegisterPage> {
   final Color primaryColor = const Color(0xFF016782);
   final Color surfaceColor = const Color(0xFFF7F9FB);
   final Color surfaceContainerHighest = const Color(0xFFDCE4E8);
   final Color onSurfaceVariant = const Color(0xFF596064);
   final Color outlineColor = const Color(0xFF747C80);
 
+  final AuthService _authService = AuthService();
+
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController = TextEditingController();
+
+  // --- ESTADO ---
+  bool _isLoading = false;
+  String? _errorMessage;
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  String? _validate() {
+    if (_usernameController.text.trim().isEmpty) {
+      return 'El nombre de usuario es obligatorio.';
+    }
+    if (_emailController.text.trim().isEmpty || !_emailController.text.contains('@')) {
+      return 'Ingresa un correo válido.';
+    }
+    if (_passwordController.text.length < 6) {
+      return 'La contraseña debe tener al menos 6 caracteres.';
+    }
+    if (_passwordController.text != _confirmPasswordController.text) {
+      return 'Las contraseñas no coinciden.';
+    }
+    return null;
+  }
+
+  // --- CREAR CUENTA ---
+  Future<void> _handleRegister() async {
+    final error = _validate();
+    if (error != null) {
+      setState(() => _errorMessage = error);
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      // 1. Guardamos la respuesta de Supabase en una variable
+      final response = await _authService.signUpWithEmailPassword(
+        email: _emailController.text.trim(),
+        password: _passwordController.text.trim(),
+        username: _usernameController.text.trim(),
+      );
+
+      // 2. VERIFICACIÓN DE CORREO DUPLICADO (La magia de Supabase)
+      // Si identities está vacío, significa que el usuario ya estaba registrado en la base de datos.
+      if (response.user != null && response.user!.identities != null && response.user!.identities!.isEmpty) {
+        setState(() {
+          _errorMessage = 'Este correo ya está registrado. Por favor, inicia sesión.';
+        });
+        return; // Detenemos la ejecución aquí, no mostramos el diálogo
+      }
+
+      // 3. Si todo está bien y es un usuario nuevo, mostramos el panel del código OTP
+      if (mounted) _showVerificationDialog(_emailController.text.trim());
+
+    } catch (e) {
+      debugPrint('🚨 ERROR REAL DE SUPABASE: $e');
+      setState(() {
+        _errorMessage = e.toString().replaceAll('Exception: Error al registrar: AuthException(message: ', '').replaceAll(')', '');      });
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // --- DIÁLOGO DE VERIFICACIÓN ---
+  void _showVerificationDialog(String email) {
+    final TextEditingController otpController = TextEditingController();
+    bool isVerifying = false;
+    String? otpError;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+          builder: (contextDialog, setStateDialog) {
+            return AlertDialog(
+              backgroundColor: surfaceColor,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF94DFFE).withValues(alpha: 0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(Icons.password_rounded, size: 48, color: primaryColor),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Ingresa tu código',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: primaryColor),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Enviamos un código de 6 dígitos a:\n$email',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: onSurfaceVariant, fontSize: 14),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Input para el código
+                  TextField(
+                    controller: otpController,
+                    keyboardType: TextInputType.number,
+                    maxLength: 6,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: primaryColor, letterSpacing: 8),
+                    decoration: InputDecoration(
+                      counterText: "",
+                      hintText: "000000",
+                      filled: true,
+                      fillColor: surfaceContainerHighest,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                  ),
+
+                  if (otpError != null) ...[
+                    const SizedBox(height: 12),
+                    Text(otpError!, style: const TextStyle(color: Colors.red, fontSize: 13), textAlign: TextAlign.center),
+                  ],
+
+                  const SizedBox(height: 24),
+
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: primaryColor,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: isVerifying ? null : () async {
+                        if (otpController.text.length < 6) {
+                          setStateDialog(() => otpError = "Ingresa los 6 dígitos");
+                          return;
+                        }
+
+                        setStateDialog(() {
+                          isVerifying = true;
+                          otpError = null;
+                        });
+
+                        try {
+                          await _authService.verifyEmailOTP(email, otpController.text.trim());
+
+                          // FIX 2: Validación de contexto montado para async gaps
+                          if (!context.mounted) return;
+
+                          // Si es exitoso, cierra el diálogo
+                          Navigator.of(ctx).pop();
+
+                          // Navega al HomePage eliminando el historial
+                          Navigator.pushAndRemoveUntil(
+                            context,
+                            MaterialPageRoute(builder: (_) => const MainLayout()),
+                                (route) => false,
+                          );
+
+                        } catch (e) {
+                          setStateDialog(() {
+                            otpError = "Código inválido o expirado.";
+                            isVerifying = false;
+                          });
+                        }
+                      },
+                      child: isVerifying
+                          ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                          : const Text('Verificar', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextButton(
+                    onPressed: isVerifying ? null : () {
+                      Navigator.of(ctx).pop(); // Permite cancelar y volver
+                    },
+                    child: Text('Cancelar', style: TextStyle(color: onSurfaceVariant)),
+                  )
+                ],
+              ),
+            );
+          }
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: surfaceColor,
-      // --- APP BAR (Cabecera) ---
       appBar: AppBar(
-        backgroundColor: surfaceColor.withOpacity(0.9),
-        elevation: 0, // Sin sombra para simular el diseño web
-        centerTitle: true,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
         leading: IconButton(
           icon: Icon(Icons.arrow_back, color: primaryColor),
-          onPressed: () {
-            // Acción para volver atrás
-            Navigator.pop(context);
-          },
-        ),
-        title: Text(
-          "EpicurIA",
-          style: TextStyle(
-            color: primaryColor,
-            fontSize: 20,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.5, // "tracking-tighter"
-          ),
+          onPressed: () => Navigator.pop(context),
         ),
       ),
-
-      // --- CUERPO PRINCIPAL ---
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // 1. SECCIÓN DE FOTO DE PERFIL
-              _buildAvatarSection(),
-              const SizedBox(height: 40),
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24.0),
+            child: Column(
+              children: [
+                _buildLogoHeader(),
+                const SizedBox(height: 40),
 
-              // 2. FORMULARIO DE REGISTRO
-              _buildTextField(
-                label: "Nombre de usuario",
-                hintText: "Ej: gourmet_hunter",
-                icon: Icons.person_outline,
-              ),
-              _buildTextField(
-                label: "Correo electrónico",
-                hintText: "usuario@ejemplo.com",
-                icon: Icons.mail_outline,
-                keyboardType: TextInputType.emailAddress,
-              ),
-              _buildTextField(
-                label: "Teléfono (verificación)",
-                hintText: "+34 000 000 000",
-                icon: Icons.call_outlined,
-                keyboardType: TextInputType.phone,
-              ),
-              _buildTextField(
-                label: "Contraseña",
-                hintText: "••••••••",
-                icon: Icons.lock_outline,
-                isPassword: true,
-              ),
-              _buildTextField(
-                label: "Confirmar contraseña",
-                hintText: "••••••••",
-                icon: Icons.verified_user_outlined,
-                isPassword: true,
-              ),
+                _buildTextField(
+                  label: "Nombre de usuario",
+                  hintText: "Ej: gourmet_hunter",
+                  icon: Icons.person_outline,
+                  controller: _usernameController,
+                ),
+                _buildTextField(
+                  label: "Correo electrónico",
+                  hintText: "usuario@ejemplo.com",
+                  icon: Icons.mail_outline,
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                ),
+                _buildTextField(
+                  label: "Contraseña",
+                  hintText: "••••••••",
+                  icon: Icons.lock_outline,
+                  controller: _passwordController,
+                  isPassword: true,
+                ),
+                _buildTextField(
+                  label: "Confirmar contraseña",
+                  hintText: "••••••••",
+                  icon: Icons.verified_user_outlined,
+                  controller: _confirmPasswordController,
+                  isPassword: true,
+                ),
 
-              const SizedBox(height: 16),
-
-              // 3. BOTÓN DE CREAR CUENTA
-              _buildSubmitButton(),
-
-              const SizedBox(height: 32),
-
-              // 4. LINK PARA INICIAR SESIÓN (Footer)
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    "¿Ya tienes cuenta? ",
-                    style: TextStyle(
-                      color: onSurfaceVariant,
-                      fontWeight: FontWeight.w500,
+                if (_errorMessage != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Text(
+                      _errorMessage!,
+                      style: const TextStyle(color: Colors.red, fontSize: 13),
                     ),
                   ),
-                  InkWell(
-                    onTap: () {
-                      // Acción para ir al Login
-                      Navigator.pop(context);
-                    },
-                    child: Text(
-                      "Iniciar sesión",
-                      style: TextStyle(
-                        color: primaryColor,
-                        fontWeight: FontWeight.bold,
+
+                _buildSubmitButton(),
+                const SizedBox(height: 32),
+
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text("¿Ya tienes cuenta? ",
+                        style: TextStyle(color: onSurfaceVariant)),
+                    InkWell(
+                      onTap: () => Navigator.pop(context),
+                      child: Text(
+                        "Inicia sesión",
+                        style: TextStyle(
+                            color: primaryColor, fontWeight: FontWeight.bold),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24), // Espaciador final
-            ],
+                  ],
+                ),
+                const SizedBox(height: 24),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  // --- WIDGETS DE CONSTRUCCIÓN ---
-
-  Widget _buildAvatarSection() {
+  // --- LOGO  ---
+  Widget _buildLogoHeader() {
     return Column(
       children: [
-        Stack(
-          alignment: Alignment.bottomRight,
-          children: [
-            // Círculo del Avatar
-            Container(
-              width: 128,
-              height: 128,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: surfaceContainerHighest,
-                border: Border.all(color: Colors.white, width: 4),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Colors.black12,
-                    blurRadius: 32,
-                    offset: Offset(0, -8),
-                  )
-                ],
-              ),
-              child: Center(
-                child: Icon(
-                  Icons.add_a_photo,
-                  size: 40,
-                  color: primaryColor.withOpacity(0.8),
+        SizedBox(
+          width: 80,
+          height: 80,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF94DFFE).withOpacity(0.4),
+                  shape: BoxShape.circle,
                 ),
               ),
-            ),
-            // Botón flotante de "Editar"
-            Container(
-              margin: const EdgeInsets.only(bottom: 4, right: 4),
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: primaryColor,
-                shape: BoxShape.circle,
-                boxShadow: const [
-                  BoxShadow(
-                    color: Colors.black26,
-                    blurRadius: 8,
-                    offset: Offset(0, 4),
-                  )
-                ],
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(color: primaryColor, shape: BoxShape.circle),
+                child: const Icon(Icons.restaurant, color: Colors.white, size: 28),
               ),
-              child: const Icon(Icons.edit, color: Colors.white, size: 16),
-            ),
-          ],
+              Positioned(
+                top: 8,
+                right: 8,
+                child: Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF94DFFE),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFF7F9FB), width: 2),
+                  ),
+                  child: const Icon(Icons.auto_awesome,
+                      color: Color(0xFF016782), size: 14),
+                ),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 16),
+        Text("Crea tu cuenta",
+            style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w800,
+                color: primaryColor)),
         Text(
-          "FOTO DE PERFIL",
+          "Únete a la comunidad de EpicurIA",
           style: TextStyle(
-            color: onSurfaceVariant,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.5, // "tracking-widest"
-          ),
+              fontSize: 14,
+              color: onSurfaceVariant,
+              fontWeight: FontWeight.w500),
         ),
       ],
     );
   }
 
+  // --- CAMPO DE TEXTO ---
   Widget _buildTextField({
     required String label,
     required String hintText,
     required IconData icon,
+    required TextEditingController controller,
     bool isPassword = false,
     TextInputType keyboardType = TextInputType.text,
   }) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 24.0), // space-y-6 equivalente
+      padding: const EdgeInsets.only(bottom: 20.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -202,29 +383,23 @@ class RegisterPage extends StatelessWidget {
             child: Text(
               label,
               style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: onSurfaceVariant,
-              ),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: onSurfaceVariant),
             ),
           ),
           TextField(
+            controller: controller,
             obscureText: isPassword,
             keyboardType: keyboardType,
             decoration: InputDecoration(
               hintText: hintText,
-              hintStyle: TextStyle(color: outlineColor.withOpacity(0.6)),
-              prefixIcon: Icon(icon, color: outlineColor),
+              prefixIcon: Icon(icon, color: outlineColor, size: 20),
               filled: true,
               fillColor: surfaceContainerHighest,
-              contentPadding: const EdgeInsets.symmetric(vertical: 16),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
                 borderSide: BorderSide.none,
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: primaryColor.withOpacity(0.5), width: 2),
               ),
             ),
           ),
@@ -233,37 +408,23 @@ class RegisterPage extends StatelessWidget {
     );
   }
 
+  // --- BOTÓN PRINCIPAL ---
   Widget _buildSubmitButton() {
     return SizedBox(
       width: double.infinity,
-      height: 56, // py-4 equivalente
+      height: 56,
       child: ElevatedButton(
         style: ElevatedButton.styleFrom(
           backgroundColor: primaryColor,
-          foregroundColor: Colors.white, // on-primary
-          elevation: 8, // shadow-lg
-          shadowColor: primaryColor.withOpacity(0.5),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12), // rounded-xl
-          ),
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          elevation: 0,
         ),
-        onPressed: () {
-          print("Botón Crear Cuenta presionado");
-        },
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: const [
-            Text(
-              "Crear Cuenta",
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            SizedBox(width: 8),
-            Icon(Icons.arrow_forward),
-          ],
-        ),
+        onPressed: _isLoading ? null : _handleRegister,
+        child: _isLoading
+            ? const CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
+            : const Text("Registrarse",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
       ),
     );
   }

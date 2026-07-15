@@ -1,8 +1,35 @@
+/// lib/home_page.dart
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'recipe_analysis_page.dart';
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'services/recipe_service.dart';
+import 'services/media_service.dart';
+import 'services/profile_service.dart';
+import 'models/user_profile.dart';
 
+import 'widgets/profile_avatar_menu.dart';
+class HomePage extends StatefulWidget {
+
+  final VoidCallback onNavigateToHistory;
+  const HomePage({super.key, required this.onNavigateToHistory});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  // --- SERVICIOS ---
+  final MediaService _mediaService = MediaService();
+  final ProfileService _profileService = ProfileService();
+  final RecipeService _recipeService = RecipeService();
+  // --- ESTADO ---
+  UserProfile? _userProfile;
+  bool _isLoadingProfile = true;
+
+  List<Map<String, dynamic>> _recentRecipes = [];
+  bool _isLoadingRecipes = true;
   // --- PALETA DE COLORES ---
   final Color primaryColor = const Color(0xFF016782);
   final Color primaryDim = const Color(0xFF005B73);
@@ -13,47 +40,107 @@ class HomePage extends StatelessWidget {
   final Color onSurfaceVariant = const Color(0xFF596064);
 
   @override
+  void initState() {
+    super.initState();
+    _loadInitialData();
+  }
+
+  Future<void> _loadInitialData() async {
+    try {
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId == null) return;
+
+
+      final results = await Future.wait([
+        _profileService.getCurrentProfile(),
+        _recipeService.getRecentUniqueRecipes(userId),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _userProfile = results[0] as UserProfile?;
+          _recentRecipes = results[1] as List<Map<String, dynamic>>;
+          _isLoadingProfile = false;
+          _isLoadingRecipes = false;
+        });
+      }
+    } catch (e) {
+      debugPrint("Error cargando datos iniciales: $e");
+      if (mounted) {
+        setState(() {
+          _isLoadingProfile = false;
+          _isLoadingRecipes = false;
+        });
+      }
+    }
+  }
+
+
+  Future<void> _handleImageSelection(ImageSource source) async {
+    final File? imageFile = await _mediaService.pickImage(source);
+
+    if (imageFile != null && mounted) {
+
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => RecipeAnalysisPage(
+            imageFile: imageFile,
+            userProfile: _userProfile,
+          ),
+        ),
+      );
+
+      if (mounted) {
+        setState(() {
+          _isLoadingRecipes = true;
+        });
+        await _loadInitialData();
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: backgroundColor,
-      // --- APP BAR (Cabecera modificada) ---
       appBar: AppBar(
         backgroundColor: backgroundColor.withOpacity(0.9),
         elevation: 0,
-        automaticallyImplyLeading: false, // Oculta la flecha de atrás por defecto
-        actions: [
-          // Foto de perfil a la derecha
-          Padding(
-            padding: const EdgeInsets.only(right: 24.0),
-            child: InkWell(
-              onTap: () {
-                print("Ir al perfil");
-              },
-              child: Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: const Color(0xFF94DFFE), width: 2),
-                ),
-                child: const CircleAvatar(
-                  radius: 20,
-                  backgroundImage: NetworkImage(
-                    "https://images.unsplash.com/photo-1577219491135-ce391730fb2c?ixlib=rb-4.0.3&auto=format&fit=crop&w=100&q=80", // Imagen de prueba
-                  ),
-                ),
+        automaticallyImplyLeading: false,
+        title: _isLoadingProfile
+            ? const SizedBox()
+            : Row(
+          children: [
+            const SizedBox(width: 8),
+            Text(
+              "Hola, ${_userProfile?.nombre ?? 'Gourmet'}",
+              style: TextStyle(
+                color: primaryColor,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
               ),
             ),
+          ],
+        ),
+        actions: [
+          ProfileAvatarMenu(
+            userProfile: _userProfile,
+            radius: 20.0,
+            paddingRight: 24.0,
           ),
         ],
       ),
 
-      // --- CUERPO PRINCIPAL ---
+
       body: SafeArea(
+        bottom: false,
         child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
+
+          padding: const EdgeInsets.only(left: 24.0, right: 24.0, top: 16.0, bottom: 110.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 1. SALUDO
               Text(
                 "¿Qué se te antoja\npreparar hoy?",
                 style: TextStyle(
@@ -74,20 +161,18 @@ class HomePage extends StatelessWidget {
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              const SizedBox(height: 48),
+              const SizedBox(height: 12),
 
-              // 2. BOTÓN CENTRAL GIGANTE (Escanear)
               Center(
                 child: Column(
                   children: [
                     _buildMainScanButton(context),
-                    const SizedBox(height: 24),
-                    // Botón secundario de galería
+                    const SizedBox(height: 20),
                     _buildGalleryButton(),
                   ],
                 ),
               ),
-              const SizedBox(height: 48),
+              const SizedBox(height: 18),
 
               // 3. SECCIÓN: ÚLTIMOS ANÁLISIS
               _buildLatestAnalysisSection(),
@@ -98,7 +183,7 @@ class HomePage extends StatelessWidget {
     );
   }
 
-  // --- WIDGETS DE CONSTRUCCIÓN ---
+
 
   Widget _buildMainScanButton(BuildContext context) {
     return SizedBox(
@@ -143,13 +228,7 @@ class HomePage extends StatelessWidget {
               color: Colors.transparent,
               child: InkWell(
                 borderRadius: BorderRadius.circular(40),
-                onTap: () {
-                  // --- AQUÍ ESTÁ LA NAVEGACIÓN A LA NUEVA PANTALLA ---
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => const RecipeAnalysisPage()),
-                  );
-                },
+                onTap: () => _handleImageSelection(ImageSource.camera),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -177,9 +256,7 @@ class HomePage extends StatelessWidget {
 
   Widget _buildGalleryButton() {
     return ElevatedButton.icon(
-      onPressed: () {
-        print("Abrir galería");
-      },
+      onPressed: () => _handleImageSelection(ImageSource.gallery),
       icon: const Icon(Icons.add_photo_alternate_outlined),
       label: const Text("Subir desde la galería"),
       style: ElevatedButton.styleFrom(
@@ -210,51 +287,65 @@ class HomePage extends StatelessWidget {
                 color: onBackground,
               ),
             ),
-            InkWell(
-              onTap: () {},
-              child: Row(
-                children: [
-                  Text(
-                    "Ver todos",
-                    style: TextStyle(
-                      color: primaryColor,
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
+            if (_recentRecipes.isNotEmpty)
+              InkWell(
+                onTap: () {
+                  // --- CAMBIO AQUÍ: Usamos la función en lugar de Navigator.push ---
+                  widget.onNavigateToHistory();
+                },
+                child: Row(
+                  children: [
+                    Text(
+                      "Ver todos",
+                      style: TextStyle(
+                        color: primaryColor,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                  Icon(Icons.arrow_forward, color: primaryColor, size: 16),
-                ],
+                    Icon(Icons.arrow_forward, color: primaryColor, size: 16),
+                  ],
+                ),
               ),
-            ),
           ],
         ),
         const SizedBox(height: 16),
-        // Lista horizontal de tarjetas
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          clipBehavior: Clip.none, // Para que las sombras no se corten
-          child: Row(
-            children: [
-              _buildDishCard(
-                category: "ENSALADA",
-                title: "Bowl de Salmón",
-                imageUrl: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80",
+
+        if (_isLoadingRecipes)
+          const Center(child: CircularProgressIndicator())
+        else if (_recentRecipes.isEmpty)
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 32.0),
+              child: Text(
+                "Aún no has analizado ningún plato.\n¡Anímate a escanear tu primera comida!",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: onSurfaceVariant, fontSize: 14),
               ),
-              const SizedBox(width: 16),
-              _buildDishCard(
-                category: "ITALIANA",
-                title: "Penne Pomodoro",
-                imageUrl: "https://images.unsplash.com/photo-1621996346565-e3dbc646d9a9?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80",
-              ),
-              const SizedBox(width: 16),
-              _buildDishCard(
-                category: "PIZZA",
-                title: "Margherita Especial",
-                imageUrl: "https://images.unsplash.com/photo-1574071318508-1cdbab80d002?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80",
-              ),
-            ],
+            ),
+          )
+        else
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            child: Row(
+              children: _recentRecipes.map((recipe) {
+                final String title = recipe['titulo_receta'] ?? 'Desconocido';
+                final String imageUrl = recipe['imagen_url'] ?? 'https://via.placeholder.com/300';
+
+                final String category = "ESCANEADO";
+
+                return Padding(
+                  padding: const EdgeInsets.only(right: 16.0),
+                  child: _buildDishCard(
+                    category: category,
+                    title: title,
+                    imageUrl: imageUrl,
+                  ),
+                );
+              }).toList(),
+            ),
           ),
-        ),
       ],
     );
   }
@@ -280,6 +371,28 @@ class HomePage extends StatelessWidget {
               height: 140,
               width: double.infinity,
               fit: BoxFit.cover,
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return Container(
+                  height: 140,
+                  width: double.infinity,
+                  color: surfaceContainerLow,
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      color: primaryColor,
+                      value: loadingProgress.expectedTotalBytes != null
+                          ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                          : null,
+                    ),
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) => Container(
+                height: 140,
+                width: double.infinity,
+                color: surfaceContainerLow,
+                child: Icon(Icons.broken_image_rounded, color: onSurfaceVariant, size: 40),
+              ),
             ),
           ),
           const SizedBox(height: 12),
